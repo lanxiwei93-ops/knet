@@ -1,9 +1,122 @@
 from __future__ import annotations
 
+import configparser
 import json
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+
+CONFIG_FILE_NAME = "config.ini"
+DEFAULT_DB_SECTION = "database"
+DEFAULT_DB_PATHS_SECTION = "database_paths"
+DEFAULT_DB_NAMES_SECTION = "database_names"
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _load_config(config_path: str | Path | None = None) -> tuple[configparser.ConfigParser, Path]:
+    resolved_config_path = Path(config_path) if config_path else _project_root() / CONFIG_FILE_NAME
+    if not resolved_config_path.is_absolute():
+        resolved_config_path = (_project_root() / resolved_config_path).resolve()
+
+    parser = configparser.ConfigParser()
+    if resolved_config_path.exists():
+        parser.read(resolved_config_path, encoding="utf-8")
+
+    return parser, resolved_config_path
+
+
+def _is_path_like(db_selector: object) -> bool:
+    if isinstance(db_selector, Path):
+        return True
+    if not isinstance(db_selector, str):
+        return False
+
+    candidate = db_selector.strip()
+    if not candidate:
+        return False
+
+    return any(
+        token in candidate
+        for token in (
+            "/",
+            "\\",
+            ".db",
+            ".sqlite",
+            ".sqlite3",
+            ":",
+        )
+    )
+
+
+def _normalize_db_number(db_selector: int | str | None, parser: configparser.ConfigParser) -> str:
+    if db_selector is None:
+        db_selector = parser.get(DEFAULT_DB_SECTION, "current", fallback="1")
+
+    if isinstance(db_selector, int):
+        db_number = str(db_selector)
+    else:
+        db_number = str(db_selector).strip()
+
+    if not db_number.isdigit():
+        raise ValueError(f"database selector must be a numeric id or a filesystem path: {db_selector}")
+
+    return db_number
+
+
+def resolve_db_path(
+    db_selector: int | str | Path | None = None,
+    *,
+    config_path: str | Path | None = None,
+) -> Path:
+    parser, _ = _load_config(config_path)
+    project_root = _project_root()
+
+    if _is_path_like(db_selector):
+        resolved_path = Path(str(db_selector))
+        if not resolved_path.is_absolute():
+            resolved_path = (project_root / resolved_path).resolve()
+        return resolved_path
+
+    db_number = _normalize_db_number(db_selector, parser)
+    configured_path = parser.get(DEFAULT_DB_PATHS_SECTION, db_number, fallback="").strip()
+
+    if configured_path:
+        resolved_path = Path(configured_path)
+    else:
+        data_dir = parser.get(DEFAULT_DB_SECTION, "root", fallback="data").strip() or "data"
+        filename_template = (
+            parser.get(DEFAULT_DB_SECTION, "filename_template", fallback="graph_{db_number}.db").strip()
+            or "graph_{db_number}.db"
+        )
+        resolved_path = Path(data_dir) / filename_template.format(db_number=db_number)
+
+    if not resolved_path.is_absolute():
+        resolved_path = (project_root / resolved_path).resolve()
+
+    return resolved_path
+
+
+def resolve_db_name(
+    db_selector: int | str | None = None,
+    *,
+    config_path: str | Path | None = None,
+) -> str:
+    parser, _ = _load_config(config_path)
+    db_number = _normalize_db_number(db_selector, parser)
+    return parser.get(DEFAULT_DB_NAMES_SECTION, db_number, fallback=f"database_{db_number}").strip()
+
+
+def resolve_db_number(
+    db_selector: int | str | None = None,
+    *,
+    config_path: str | Path | None = None,
+) -> str:
+    parser, _ = _load_config(config_path)
+    return _normalize_db_number(db_selector, parser)
 
 
 class GraphCrud:
@@ -21,8 +134,15 @@ class GraphCrud:
     maximum outbound weight for source_id plus one.
     """
 
-    def __init__(self, db_path: str | Path, sql_dir: str | Path | None = None) -> None:
-        self.db_path = Path(db_path)
+    def __init__(
+        self,
+        db_path: int | str | Path | None = None,
+        sql_dir: str | Path | None = None,
+        config_path: str | Path | None = None,
+    ) -> None:
+        _, resolved_config_path = _load_config(config_path)
+        self.db_path = resolve_db_path(db_path, config_path=config_path)
+        self.config_path = resolved_config_path
         self.sql_dir = Path(sql_dir) if sql_dir else Path(__file__).resolve().parent / "sql" / "simple-graph"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -239,4 +359,4 @@ class GraphCrud:
             raise ValueError(f"{field_name} must be a non-empty string")
 
 
-__all__ = ["GraphCrud"]
+__all__ = ["GraphCrud", "resolve_db_name", "resolve_db_number", "resolve_db_path"]

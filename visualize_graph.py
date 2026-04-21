@@ -8,7 +8,7 @@ from pathlib import Path
 
 from pyvis.network import Network
 
-from graph_crud import GraphCrud
+from graph_crud import GraphCrud, resolve_db_name, resolve_db_number, resolve_db_path
 
 
 NETWORK_OPTIONS = """
@@ -116,13 +116,15 @@ def remove_default_heading_blocks(output_path: Path) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render the stored graph into a pyvis HTML page.")
     parser.add_argument(
+        "--db-number",
+        help="Database number from config.ini. Defaults to the [database].current value.",
+    )
+    parser.add_argument(
         "--db-path",
-        default=str(Path("data") / "graph.db"),
-        help="SQLite database path. Default: data/graph.db",
+        help="SQLite database path override. When set, it takes precedence over --db-number.",
     )
     parser.add_argument(
         "--output",
-        default=str(Path("data") / "graph.html"),
         help="Output HTML path. Default: data/graph.html",
     )
     return parser.parse_args()
@@ -130,8 +132,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    db_path = Path(args.db_path).resolve()
-    output_path = Path(args.output).resolve()
+    selected_db_number = args.db_number.strip() if args.db_number else None
+    effective_db_number = resolve_db_number(selected_db_number)
+    db_path = resolve_db_path(args.db_path or selected_db_number)
+    output_value = args.output or str(Path("data") / "graph.html")
+    output_path = Path(output_value).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     network = build_network(db_path)
@@ -144,6 +149,8 @@ def main() -> None:
 
     remove_default_heading_blocks(output_path)
     print(f"Graph HTML written to: {output_path}")
+    print(f"Database path: {db_path}")
+    print(f"Database label: {resolve_db_name(effective_db_number)}")
 
 
 if __name__ == "__main__":
