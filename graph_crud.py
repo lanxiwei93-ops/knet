@@ -150,7 +150,10 @@ class GraphCrud:
         self._insert_node_sql = self._read_sql("insert-node.sql")
         self._insert_edge_sql = self._read_sql("insert-edge.sql")
         self._update_edge_sql = self._read_sql("update-edge.sql")
+        self._delete_node_sql = self._read_sql("delete-node.sql")
         self._delete_edge_sql = self._read_sql("delete-edge.sql")
+        self._delete_incoming_edges_sql = self._read_sql("delete-incoming-edges.sql")
+        self._delete_outgoing_edges_sql = self._read_sql("delete-outgoing-edges.sql")
 
         self.initialize()
 
@@ -231,6 +234,20 @@ class GraphCrud:
             connection.execute(self._insert_edge_sql, (source_id, target_id, json.dumps(payload, ensure_ascii=False)))
 
         return {"source_id": source_id, "target_id": target_id, "weight": 0}
+
+    def delete_node(self, node_id: str) -> dict[str, Any]:
+        self._validate_required_text("node_id", node_id)
+
+        with self._connect() as connection:
+            row = connection.execute("SELECT body FROM nodes WHERE id = ?", (node_id,)).fetchone()
+            if not row:
+                raise ValueError(f"node does not exist: {node_id}")
+
+            connection.execute(self._delete_outgoing_edges_sql, (node_id,))
+            connection.execute(self._delete_incoming_edges_sql, (node_id,))
+            connection.execute(self._delete_node_sql, (node_id,))
+
+        return self._decode_node_row(row["body"])
 
     def list_connected_nodes(self, source_id: str) -> list[dict[str, Any]]:
         self._validate_required_text("source_id", source_id)
