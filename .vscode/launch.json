@@ -1,0 +1,12 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "运行",
+      "type": "node-terminal",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "command": "Set-Location '${workspaceFolder}'; & 'D:\\anaconda3\\python.exe' '.\\visualize_graph.py'; $html=(Resolve-Path '.\\data\\graph.html').Path; $chrome=@('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe','C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',((Get-Command chrome.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1))) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1; if (-not $chrome) { throw 'Chrome not found' }; $p=Start-Process -FilePath $chrome -ArgumentList $html -PassThru; Start-Sleep -Seconds 2; $ws=New-Object -ComObject WScript.Shell; [void]$ws.AppActivate($p.Id)"
+    }
+  ]
+}

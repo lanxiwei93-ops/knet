@@ -3,8 +3,41 @@ from __future__ import annotations
 import configparser
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+REVIEW_FIELD_LATEST = "LatestReviewTime"
+REVIEW_FIELD_INTERVAL = "Interval"
+DEFAULT_NEW_NODE_INTERVAL_N = 0
+
+
+def current_time_iso() -> str:
+    """Return current local time as an ISO8601 string (seconds precision)."""
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
+
+
+def sm2_interval_days(n: int) -> int:
+    """SM-2 style interval in days for level n.
+
+    I0 = 0, I1 = 1, I2 = 3, I_n = I_{n-1} * 2 for n >= 3.
+    Negative or non-integer n is treated as 0.
+    """
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return 0
+    if n <= 0:
+        return 0
+    if n == 1:
+        return 1
+    if n == 2:
+        return 3
+    value = 3
+    for _ in range(n - 2):
+        value *= 2
+    return value
 
 
 CONFIG_FILE_NAME = "config.ini"
@@ -207,7 +240,11 @@ class GraphCrud:
         if "id" in extra or "name" in extra:
             raise ValueError("extra fields must not override id or name")
 
-        payload = {"id": node_id, "name": name, **extra}
+        payload = {"id": node_id, "name": name}
+        # Default review fields: new node starts at n = 0, no review yet.
+        payload[REVIEW_FIELD_LATEST] = ""
+        payload[REVIEW_FIELD_INTERVAL] = DEFAULT_NEW_NODE_INTERVAL_N
+        payload.update(extra)
 
         with self._connect() as connection:
             existing = connection.execute("SELECT 1 FROM nodes WHERE id = ?", (node_id,)).fetchone()
@@ -230,10 +267,20 @@ class GraphCrud:
             if existing:
                 return existing
 
-            payload = {"weight": 0}
+            payload = {
+                "weight": 0,
+                REVIEW_FIELD_LATEST: "",
+                REVIEW_FIELD_INTERVAL: DEFAULT_NEW_NODE_INTERVAL_N,
+            }
             connection.execute(self._insert_edge_sql, (source_id, target_id, json.dumps(payload, ensure_ascii=False)))
 
-        return {"source_id": source_id, "target_id": target_id, "weight": 0}
+        return {
+            "source_id": source_id,
+            "target_id": target_id,
+            "weight": 0,
+            REVIEW_FIELD_LATEST: "",
+            REVIEW_FIELD_INTERVAL: DEFAULT_NEW_NODE_INTERVAL_N,
+        }
 
     def delete_node(self, node_id: str) -> dict[str, Any]:
         self._validate_required_text("node_id", node_id)
@@ -323,6 +370,138 @@ class GraphCrud:
 
         return {"source_id": source_id, "target_id": target_id, "weight": next_weight}
 
+    def update_node_review(self, node_id: str, *, interval_n: int, latest_review_time: str | None = None) -> dict[str, Any]:
+        """Update review fields on a node body.
+
+        ``latest_review_time`` defaults to current local time. Pass an empty
+        string to clear the timestamp (used by MarkUndo before n=0 reset).
+        """
+        self._validate_required_text("node_id", node_id)
+        try:
+            interval_n_int = int(interval_n)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("interval_n must be an integer") from exc
+
+        timestamp = current_time_iso() if latest_review_time is None else latest_review_time
+
+        with self._connect() as connection:
+            row = connection.execute("SELECT body FROM nodes WHERE id = ?", (node_id,)).fetchone()
+            if not row:
+                raise ValueError(f"node does not exist: {node_id}")
+            body = self._decode_json(row["body"])
+            body[REVIEW_FIELD_LATEST] = timestamp
+            body[REVIEW_FIELD_INTERVAL] = interval_n_int
+            connection.execute(
+                "UPDATE nodes SET body = ? WHERE id = ?",
+                (json.dumps(body, ensure_ascii=False), node_id),
+            )
+
+        return body
+
+    def update_edge_review(
+        self,
+        source_id: str,
+        target_id: str,
+        *,
+        interval_n: int,
+        latest_review_time: str | None = None,
+    ) -> dict[str, Any]:
+        """Update review fields on an edge's properties JSON."""
+        self._validate_required_text("source_id", source_id)
+        self._validate_required_text("target_id", target_id)
+        try:
+            interval_n_int = int(interval_n)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("interval_n must be an integer") from exc
+
+        timestamp = current_time_iso() if latest_review_time is None else latest_review_time
+
+        with self._connect() as connection:
+            current = self._get_edge(connection, source_id, target_id)
+            if not current:
+                raise ValueError(f"edge does not exist: {source_id} -> {target_id}")
+            payload = current["properties"]
+            payload[REVIEW_FIELD_LATEST] = timestamp
+            payload[REVIEW_FIELD_INTERVAL] = interval_n_int
+            connection.execute(
+                self._update_edge_sql,
+                (json.dumps(payload, ensure_ascii=False), source_id, target_id),
+            )
+
+        return {
+            "source_id": source_id,
+            "target_id": target_id,
+            "weight": int(payload.get("weight", 0)),
+            REVIEW_FIELD_LATEST: timestamp,
+            REVIEW_FIELD_INTERVAL: interval_n_int,
+            "properties": payload,
+        }
+
+    def get_node(self, node_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT body FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        if not row:
+            return None
+        return self._decode_node_row(row["body"])
+
+    def get_edge(self, source_id: str, target_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            current = self._get_edge(connection, source_id, target_id)
+        if not current:
+            return None
+        properties = current["properties"]
+        return {
+            "source_id": current["source_id"],
+            "target_id": current["target_id"],
+            "weight": int(properties.get("weight", 0)),
+            REVIEW_FIELD_LATEST: properties.get(REVIEW_FIELD_LATEST, ""),
+            REVIEW_FIELD_INTERVAL: int(properties.get(REVIEW_FIELD_INTERVAL, 0) or 0),
+            "properties": properties,
+        }
+
+    def backfill_review_fields(self, default_interval_n: int = DEFAULT_NEW_NODE_INTERVAL_N) -> dict[str, int]:
+        """Ensure every node body and edge property has the two review fields.
+
+        Missing fields are populated with default values; existing values are
+        preserved. Returns counts of touched rows.
+        """
+        node_count = 0
+        edge_count = 0
+        with self._connect() as connection:
+            for row in connection.execute("SELECT id, body FROM nodes").fetchall():
+                body = self._decode_json(row["body"])
+                changed = False
+                if REVIEW_FIELD_LATEST not in body:
+                    body[REVIEW_FIELD_LATEST] = ""
+                    changed = True
+                if REVIEW_FIELD_INTERVAL not in body:
+                    body[REVIEW_FIELD_INTERVAL] = default_interval_n
+                    changed = True
+                if changed:
+                    connection.execute(
+                        "UPDATE nodes SET body = ? WHERE id = ?",
+                        (json.dumps(body, ensure_ascii=False), row["id"]),
+                    )
+                    node_count += 1
+
+            for row in connection.execute("SELECT source, target, properties FROM edges").fetchall():
+                props = self._decode_json(row["properties"])
+                changed = False
+                if REVIEW_FIELD_LATEST not in props:
+                    props[REVIEW_FIELD_LATEST] = ""
+                    changed = True
+                if REVIEW_FIELD_INTERVAL not in props:
+                    props[REVIEW_FIELD_INTERVAL] = default_interval_n
+                    changed = True
+                if changed:
+                    connection.execute(
+                        self._update_edge_sql,
+                        (json.dumps(props, ensure_ascii=False), row["source"], row["target"]),
+                    )
+                    edge_count += 1
+
+        return {"nodes_updated": node_count, "edges_updated": edge_count}
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.row_factory = sqlite3.Row
@@ -376,4 +555,14 @@ class GraphCrud:
             raise ValueError(f"{field_name} must be a non-empty string")
 
 
-__all__ = ["GraphCrud", "resolve_db_name", "resolve_db_number", "resolve_db_path"]
+__all__ = [
+    "GraphCrud",
+    "resolve_db_name",
+    "resolve_db_number",
+    "resolve_db_path",
+    "current_time_iso",
+    "sm2_interval_days",
+    "REVIEW_FIELD_LATEST",
+    "REVIEW_FIELD_INTERVAL",
+    "DEFAULT_NEW_NODE_INTERVAL_N",
+]
